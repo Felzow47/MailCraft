@@ -1,0 +1,69 @@
+# Every push and pull request: tests, then the installer and the portable exe (scripts/build-release.ps1).
+# On a push to main the release v<version> (version from Cargo.toml) is published with both:
+# a new version creates a new release, the same version replaces the release with the new build.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Tests, installer and portable exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test --release
+      - name: Installer and portable exe
+        # windows-latest ships Inno Setup 6 in Program Files (x86), where the script looks for it
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
+      - name: Both files are there
+        run: |
+          if (-not (Test-Path dist\MailCraft-Setup-*.exe) -or -not (Test-Path dist\MailCraft-*-Portable.exe)) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mailcraft
+          path: dist/MailCraft-*.exe
+
+  release:
+    name: GitHub release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mailcraft
+          path: dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="v$ver"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release delete "$tag" --yes --cleanup-tag
+          fi
+          gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "MailCraft $ver" \
+            --notes "MailCraft $ver, build of ${GITHUB_SHA::7}.
+
+          - **MailCraft-Setup-$ver.exe**: Windows installer (no administrator rights needed); can make MailCraft the default viewer for .msg files.
+          - **MailCraft-$ver-Portable.exe**: portable version, nothing to install, just run it.
+
+          Third-party licenses: [NOTICE.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/NOTICE.md)."
